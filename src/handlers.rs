@@ -21,16 +21,29 @@ pub async fn require_token(
 ) -> Result<Response, AppError> {
     let expected = &manager.config().auth_token;
 
-    let provided = req
+    let bearer = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
 
+    // The frontend can't attach an Authorization header to a plain
+    // <video src>/<a download> request, so it authenticates those via a
+    // cookie instead; API clients keep using the Authorization header.
+    let provided = bearer.or_else(|| cookie_value(req.headers(), "auth_token"));
+
     match provided {
         Some(token) if constant_time_eq(token, expected) => Ok(next.run(req).await),
         _ => Err(AppError::Unauthorized),
     }
+}
+
+fn cookie_value<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|pair| {
+        let (k, v) = pair.trim().split_once('=')?;
+        (k == name).then_some(v)
+    })
 }
 
 /// Compares two strings without short-circuiting on the first differing
@@ -49,7 +62,7 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 pub struct CreateJobRequest {
     pub url: String,
     #[serde(default)]
-    pub audio_only: bool,
+    pub quality: Format,
 }
 
 #[derive(Serialize)]
@@ -65,14 +78,8 @@ pub async fn create_job(
         return Err(AppError::BadRequest("url must not be empty".to_string()));
     }
 
-    let format = if body.audio_only {
-        Format::AudioOnly
-    } else {
-        Format::Default
-    };
-
     let job_id = manager
-        .submit(body.url, format)
+        .submit(body.url, body.quality)
         .await
         .map_err(AppError::BadRequest)?;
 

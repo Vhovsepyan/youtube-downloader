@@ -10,18 +10,42 @@ const YOUTUBE_HOSTS: &[&str] = &[
     "music.youtube.com",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 pub enum Format {
-    Default,
-    AudioOnly,
+    #[serde(rename = "1080p")]
+    #[default]
+    P1080,
+    #[serde(rename = "720p")]
+    P720,
+    #[serde(rename = "480p")]
+    P480,
+    #[serde(rename = "360p")]
+    P360,
+    #[serde(rename = "audio")]
+    Audio,
 }
 
 impl Format {
     pub fn cache_key_suffix(&self) -> &'static str {
         match self {
-            Format::Default => "default",
-            Format::AudioOnly => "audio",
+            // Kept as "default" rather than "1080p" so cache entries written
+            // before quality tiers existed (when this was the only video
+            // format) remain valid.
+            Format::P1080 => "default",
+            Format::P720 => "720p",
+            Format::P480 => "480p",
+            Format::P360 => "360p",
+            Format::Audio => "audio",
+        }
+    }
+
+    fn max_height(&self) -> Option<u32> {
+        match self {
+            Format::P1080 => Some(1080),
+            Format::P720 => Some(720),
+            Format::P480 => Some(480),
+            Format::P360 => Some(360),
+            Format::Audio => None,
         }
     }
 }
@@ -97,8 +121,8 @@ pub fn canonical_url(video_id: &str) -> String {
 /// download.
 pub async fn resolve_extension(url: &str, format: Format) -> Result<String, YtDlpError> {
     match format {
-        Format::Default => Ok("mp4".to_string()),
-        Format::AudioOnly => {
+        Format::P1080 | Format::P720 | Format::P480 | Format::P360 => Ok("mp4".to_string()),
+        Format::Audio => {
             let output = Command::new("yt-dlp")
                 .args([
                     "-f",
@@ -134,14 +158,14 @@ pub async fn resolve_extension(url: &str, format: Format) -> Result<String, YtDl
 /// which doesn't reliably carry common video codecs (e.g. VP9) at all.
 /// Writing straight to `dest` avoids that entirely and is simpler besides.
 pub async fn download_to_file(url: &str, format: Format, dest: &Path) -> Result<(), YtDlpError> {
-    let format_args: Vec<&str> = match format {
-        Format::Default => vec![
-            "-f",
-            "bv*[height<=1080]+ba/b[height<=1080]",
-            "--merge-output-format",
-            "mp4",
+    let format_args: Vec<String> = match format.max_height() {
+        Some(h) => vec![
+            "-f".to_string(),
+            format!("bv*[height<={h}]+ba/b[height<={h}]"),
+            "--merge-output-format".to_string(),
+            "mp4".to_string(),
         ],
-        Format::AudioOnly => vec!["-f", "bestaudio"],
+        None => vec!["-f".to_string(), "bestaudio".to_string()],
     };
 
     let dest_str = dest

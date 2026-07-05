@@ -1,7 +1,11 @@
 # API reference
 
-All endpoints require `Authorization: Bearer <AUTH_TOKEN>`. Missing or wrong
-token returns `401` with `{"error": "invalid or missing token"}`.
+Every endpoint requires the access token, via either:
+- `Authorization: Bearer <AUTH_TOKEN>` header (for API clients/curl), or
+- an `auth_token` cookie (what the bundled frontend uses, since a plain
+  `<video src>`/`<a download>` can't attach a custom header).
+
+Missing or wrong token returns `401` with `{"error": "invalid or missing token"}`.
 
 Served from the same origin as the frontend, under `/api/*` (see
 `Caddyfile`) — no CORS handling needed.
@@ -13,25 +17,32 @@ download itself happens asynchronously.
 
 **Request body:**
 ```json
-{ "url": "https://www.youtube.com/watch?v=...", "audio_only": false }
+{ "url": "https://www.youtube.com/watch?v=...", "quality": "1080p" }
 ```
-`audio_only` is optional, defaults to `false`.
+`quality` is optional (defaults to `"1080p"`) and must be one of: `"1080p"`,
+`"720p"`, `"480p"`, `"360p"`, `"audio"`. Video qualities are a height cap,
+not an exact match — yt-dlp picks the best available format at or below
+that height. `"audio"` downloads the best available audio-only stream in
+its native container (no video, no re-encode).
 
 **Response `200`:**
 ```json
 { "job_id": "8b1c9f3a-....-....-....-............" }
 ```
 
-If the requested video+format is already cached, the returned job is
+If the requested video+quality is already cached, the returned job is
 immediately in the `ready` state — poll it once and go straight to
 fetching `/api/videos/:id`.
 
-If another client already requested the same video+format and it's still
+If another client already requested the same video+quality and it's still
 downloading, the same `job_id` is returned — both clients end up polling
 the same job.
 
 **Errors:**
-- `400` — empty/unparseable URL (e.g. `{"error": "could not extract a YouTube video ID from that URL"}`)
+- `400` — empty/unparseable URL, or a URL that isn't actually a YouTube
+  link (e.g. `{"error": "could not extract a YouTube video ID from that URL"}`),
+  or a file too large for the configured cache
+  (`{"error": "downloaded file (...) exceeds the cache capacity (...) and cannot be cached"}`)
 
 ## `GET /api/jobs/:id`
 
@@ -39,14 +50,23 @@ Poll for job status. Recommended interval: 1-2s.
 
 **Response `200`:**
 ```json
-{ "id": "...", "status": "queued" }
-{ "id": "...", "status": "downloading" }
-{ "id": "...", "status": "ready" }
-{ "id": "...", "status": "failed", "error": "yt-dlp's stderr output" }
+{ "id": "...", "cache_key": null, "status": { "status": "queued" } }
+{ "id": "...", "status": { "status": "downloading" } }
+{ "id": "...", "status": { "status": "ready" } }
+{ "id": "...", "status": { "status": "failed", "error": "yt-dlp's stderr output" } }
 ```
+(`cache_key` is never actually present — it's an internal field skipped
+during serialization; shown above only to clarify shape.)
+
+Note `status` is a nested object (`status.status`, and `status.error` when
+failed), not a flat string.
 
 **Errors:**
 - `404` — unknown job id
+
+Finished jobs (`ready`/`failed`) are pruned automatically about an hour
+after they last changed state, so don't rely on a job id remaining pollable
+indefinitely.
 
 ## `GET /api/videos/:id`
 
@@ -62,11 +82,14 @@ automatically).
 
 ## Typical frontend flow
 
-1. `POST /api/jobs` with the URL → get `job_id`.
-2. Poll `GET /api/jobs/:job_id` every ~1-2s until `status` is `ready` or
-   `failed`.
-3. On `ready`, set a `<video>`/`<audio>` element's `src` to
-   `/api/videos/:job_id` (with the auth header attached, e.g. via a fetch +
-   blob URL, since `<video src>` can't set custom headers directly).
-4. On `failed`, show `error` to the user; there's no auto-retry, so surface
-   a manual "try again" action that just re-submits the job.
+1. `POST /api/jobs` with the URL and quality → get `job_id`.
+2. Poll `GET /api/jobs/:job_id` every ~1-2s until `status.status` is
+   `ready` or `failed`.
+3. On `ready`, either:
+   - set a `<video>`/`<audio>` element's `src` to `/api/videos/:job_id`
+     directly (the browser sends the `auth_token` cookie automatically,
+     including on Range requests, so native seeking/scrubbing works), or
+   - use a plain `<a href="/api/videos/:job_id" download>` to trigger a
+     native browser download.
+4. On `failed`, show `status.error` to the user; there's no auto-retry, so
+   surface a manual "try again" action that just re-submits the job.

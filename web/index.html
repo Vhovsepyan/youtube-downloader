@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube Downloader</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8E%AC%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --border: #dde1e6;
+    --text: #1c2126;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --danger: #dc2626;
+    --danger-bg: #fef2f2;
+    --ok: #16a34a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 2.5rem 1rem;
+  }
+
+  .wrap {
+    width: 100%;
+    max-width: 640px;
+  }
+
+  h1 {
+    font-size: 1.4rem;
+    margin: 0 0 1.25rem;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem;
+  }
+
+  /* ---- login screen ---- */
+  #login-screen {
+    max-width: 360px;
+    margin: 3rem auto 0;
+    text-align: center;
+  }
+  #login-screen p {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin-top: 0;
+  }
+  #login-screen form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  /* ---- shared form controls ---- */
+  input[type="text"], input[type="password"], select {
+    font: inherit;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+    width: 100%;
+  }
+  input:focus, select:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: -1px;
+  }
+
+  button {
+    font: inherit;
+    font-weight: 600;
+    padding: 0.6rem 1rem;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+  }
+  button:hover { background: var(--accent-hover); }
+  button.secondary {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--border);
+  }
+  button.secondary:hover { background: #f0f4ff; }
+
+  /* ---- app header ---- */
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 1.25rem;
+  }
+  #change-token {
+    font-size: 0.85rem;
+    color: var(--muted);
+    text-decoration: none;
+    cursor: pointer;
+  }
+  #change-token:hover { text-decoration: underline; }
+
+  /* ---- submit row ---- */
+  .submit-row {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+  }
+  .submit-row input[type="text"] { flex: 1 1 280px; }
+  .submit-row select { flex: 0 0 auto; width: auto; }
+  .submit-row .actions { display: flex; gap: 0.5rem; }
+
+  /* ---- job list ---- */
+  #jobs-list { display: flex; flex-direction: column; gap: 0.75rem; }
+
+  .job {
+    position: relative;
+    padding-right: 2rem;
+  }
+  .job .dismiss {
+    position: absolute;
+    top: 0.6rem;
+    right: 0.6rem;
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0.15rem 0.4rem;
+    cursor: pointer;
+  }
+  .job .dismiss:hover { color: var(--text); }
+
+  .job .url {
+    font-size: 0.85rem;
+    color: var(--muted);
+    word-break: break-all;
+    margin-bottom: 0.4rem;
+  }
+  .job .meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: #eef0f3;
+    color: var(--muted);
+  }
+
+  .spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .status-ready { color: var(--ok); font-weight: 600; }
+  .status-failed { color: var(--danger); font-weight: 600; }
+
+  .job .error-box {
+    margin-top: 0.6rem;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border-radius: 6px;
+    padding: 0.6rem 0.7rem;
+    font-size: 0.85rem;
+  }
+
+  .job .result {
+    margin-top: 0.7rem;
+  }
+  .job video, .job audio {
+    width: 100%;
+    display: block;
+    border-radius: 6px;
+  }
+  .job .save-link {
+    display: inline-block;
+    font-size: 0.9rem;
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .job .save-link:hover { text-decoration: underline; }
+
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <div id="login-screen" class="card hidden">
+    <h1>YouTube Downloader</h1>
+    <p>Enter your access token to continue.</p>
+    <form id="login-form">
+      <input type="password" id="token-input" placeholder="Access token" autocomplete="off" required>
+      <button type="submit">Continue</button>
+    </form>
+  </div>
+
+  <div id="app" class="hidden">
+    <header>
+      <h1>YouTube Downloader</h1>
+      <a id="change-token" href="#">change token</a>
+    </header>
+
+    <div class="card submit-row">
+      <input type="text" id="url-input" placeholder="Paste a YouTube URL…">
+      <select id="quality-select">
+        <option value="1080p">1080p</option>
+        <option value="720p">720p</option>
+        <option value="480p">480p</option>
+        <option value="360p">360p</option>
+        <option value="audio">Audio only</option>
+      </select>
+      <div class="actions">
+        <button type="button" id="download-btn">Download</button>
+        <button type="button" id="play-btn" class="secondary">Play</button>
+      </div>
+    </div>
+
+    <div id="jobs-list"></div>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- cookie helpers ----------
+  function getCookie(name) {
+    const match = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+  function setCookie(name, value, days) {
+    const maxAge = days * 24 * 60 * 60;
+    document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}; samesite=strict; secure`;
+  }
+  function deleteCookie(name) {
+    document.cookie = `${name}=; path=/; max-age=0; samesite=strict; secure`;
+  }
+
+  // ---------- login gate ----------
+  const loginScreen = document.getElementById("login-screen");
+  const app = document.getElementById("app");
+  const loginForm = document.getElementById("login-form");
+  const tokenInput = document.getElementById("token-input");
+  const changeTokenLink = document.getElementById("change-token");
+
+  function showApp() {
+    loginScreen.classList.add("hidden");
+    app.classList.remove("hidden");
+  }
+  function showLogin() {
+    app.classList.add("hidden");
+    loginScreen.classList.remove("hidden");
+  }
+
+  if (getCookie("auth_token")) {
+    showApp();
+  } else {
+    showLogin();
+  }
+
+  loginForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    const token = tokenInput.value.trim();
+    if (!token) return;
+    setCookie("auth_token", token, 365);
+    tokenInput.value = "";
+    showApp();
+  });
+
+  changeTokenLink.addEventListener("click", function (e) {
+    e.preventDefault();
+    deleteCookie("auth_token");
+    showLogin();
+  });
+
+  // ---------- job submission + polling ----------
+  const urlInput = document.getElementById("url-input");
+  const qualitySelect = document.getElementById("quality-select");
+  const jobsList = document.getElementById("jobs-list");
+
+  let nextRowId = 1;
+  const rows = new Map(); // rowId -> { el, url, quality, intent, jobId, status, error, timer }
+
+  function qualityLabel(q) {
+    return q === "audio" ? "Audio" : q;
+  }
+
+  function startJob(intent) {
+    const url = urlInput.value.trim();
+    if (!url) {
+      urlInput.focus();
+      return;
+    }
+    const quality = qualitySelect.value;
+    const rowId = nextRowId++;
+
+    const el = document.createElement("div");
+    el.className = "job card";
+    jobsList.prepend(el);
+
+    const row = { el, url, quality, intent, jobId: null, status: "submitting", error: null, timer: null };
+    rows.set(rowId, row);
+    render(rowId);
+    submitJob(rowId);
+  }
+
+  function submitJob(rowId) {
+    const row = rows.get(rowId);
+    if (!row) return;
+
+    fetch("/api/jobs", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: row.url, quality: row.quality }),
+    })
+      .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+      .then(({ ok, data }) => {
+        const row = rows.get(rowId);
+        if (!row) return;
+        if (!ok) {
+          row.status = "failed";
+          row.error = data.error || "request failed";
+          render(rowId);
+          return;
+        }
+        row.jobId = data.job_id;
+        row.status = "queued";
+        render(rowId);
+        poll(rowId);
+      })
+      .catch((err) => {
+        const row = rows.get(rowId);
+        if (!row) return;
+        row.status = "failed";
+        row.error = String(err);
+        render(rowId);
+      });
+  }
+
+  function poll(rowId) {
+    const row = rows.get(rowId);
+    if (!row) return;
+
+    row.timer = setInterval(async () => {
+      const row = rows.get(rowId);
+      if (!row) return;
+
+      let res, data;
+      try {
+        res = await fetch(`/api/jobs/${row.jobId}`, { credentials: "same-origin" });
+        data = await res.json();
+      } catch (err) {
+        clearInterval(row.timer);
+        row.status = "failed";
+        row.error = String(err);
+        render(rowId);
+        return;
+      }
+
+      if (!res.ok) {
+        clearInterval(row.timer);
+        row.status = "failed";
+        row.error = data.error || "lookup failed";
+        render(rowId);
+        return;
+      }
+
+      row.status = data.status.status;
+      if (row.status === "failed") {
+        row.error = data.status.error || "download failed";
+        clearInterval(row.timer);
+        render(rowId);
+      } else if (row.status === "ready") {
+        clearInterval(row.timer);
+        render(rowId);
+      } else {
+        render(rowId);
+      }
+    }, 1500);
+  }
+
+  function retry(rowId) {
+    const row = rows.get(rowId);
+    if (!row) return;
+    row.status = "submitting";
+    row.error = null;
+    row.jobId = null;
+    render(rowId);
+    submitJob(rowId);
+  }
+
+  function dismiss(rowId) {
+    const row = rows.get(rowId);
+    if (!row) return;
+    if (row.timer) clearInterval(row.timer);
+    row.el.remove();
+    rows.delete(rowId);
+  }
+
+  function render(rowId) {
+    const row = rows.get(rowId);
+    if (!row) return;
+
+    const busy = row.status === "submitting" || row.status === "queued" || row.status === "downloading";
+    const statusLabel = {
+      submitting: "starting…",
+      queued: "queued",
+      downloading: "downloading…",
+      ready: "ready",
+      failed: "failed",
+    }[row.status] || row.status;
+
+    let statusHtml = "";
+    if (busy) {
+      statusHtml = `<span class="spinner"></span><span>${statusLabel}</span>`;
+    } else if (row.status === "ready") {
+      statusHtml = `<span class="status-ready">✓ ready</span>`;
+    } else if (row.status === "failed") {
+      statusHtml = `<span class="status-failed">✕ failed</span>`;
+    }
+
+    row.el.innerHTML = `
+      <button class="dismiss" title="Remove" data-action="dismiss">×</button>
+      <div class="url">${escapeHtml(row.url)}</div>
+      <div class="meta">
+        <span class="badge">${escapeHtml(qualityLabel(row.quality))}</span>
+        <span class="badge">${row.intent === "download" ? "Download" : "Play"}</span>
+        ${statusHtml}
+      </div>
+      <div class="result"></div>
+    `;
+
+    row.el.querySelector('[data-action="dismiss"]').addEventListener("click", () => dismiss(rowId));
+
+    const resultEl = row.el.querySelector(".result");
+
+    if (row.status === "failed") {
+      const box = document.createElement("div");
+      box.className = "error-box";
+      box.textContent = row.error;
+      resultEl.appendChild(box);
+
+      const retryBtn = document.createElement("button");
+      retryBtn.className = "secondary";
+      retryBtn.style.marginTop = "0.6rem";
+      retryBtn.textContent = "Try again";
+      retryBtn.addEventListener("click", () => retry(rowId));
+      resultEl.appendChild(retryBtn);
+    }
+
+    if (row.status === "ready" && row.jobId) {
+      const src = `/api/videos/${row.jobId}`;
+      if (row.intent === "play") {
+        const player = document.createElement(row.quality === "audio" ? "audio" : "video");
+        player.src = src;
+        player.controls = true;
+        player.autoplay = true;
+        resultEl.appendChild(player);
+      } else {
+        const link = document.createElement("a");
+        link.href = src;
+        link.download = "";
+        link.className = "save-link";
+        link.textContent = "Save file";
+        resultEl.appendChild(link);
+
+        if (!row.autoDownloadTriggered) {
+          row.autoDownloadTriggered = true;
+          link.click();
+        }
+      }
+    }
+  }
+
+  function escapeHtml(s) {
+    const div = document.createElement("div");
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  document.getElementById("download-btn").addEventListener("click", () => startJob("download"));
+  document.getElementById("play-btn").addEventListener("click", () => startJob("play"));
+})();
+</script>
+
+</body>
+</html>
