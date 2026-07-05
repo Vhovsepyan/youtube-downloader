@@ -57,6 +57,11 @@ impl JobManager {
         let video_id = ytdlp::extract_video_id(&url)
             .ok_or_else(|| "could not extract a YouTube video ID from that URL".to_string())?;
         let cache_key = format!("{video_id}_{}", format.cache_key_suffix());
+        // From here on, only this canonical URL (built from the validated
+        // id) is ever passed to yt-dlp — never the raw client-supplied
+        // `url` — so client input can't smuggle CLI flags or point at a
+        // non-YouTube host.
+        let canonical_url = ytdlp::canonical_url(&video_id);
 
         // Cache hit: return an immediately-ready job.
         {
@@ -96,7 +101,7 @@ impl JobManager {
 
         let this = Arc::clone(self);
         tokio::spawn(async move {
-            this.run_job(id, url, cache_key, format).await;
+            this.run_job(id, canonical_url, cache_key, format).await;
         });
 
         Ok(id)

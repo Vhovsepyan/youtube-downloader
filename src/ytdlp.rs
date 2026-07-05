@@ -1,6 +1,14 @@
 use std::path::Path;
 
 use tokio::process::Command;
+use url::Url;
+
+const YOUTUBE_HOSTS: &[&str] = &[
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,24 +41,54 @@ impl From<std::io::Error> for YtDlpError {
 }
 
 /// Extracts a YouTube video ID from common URL shapes (watch?v=,
-/// youtu.be/, /shorts/, /embed/).
+/// youtu.be/, /shorts/, /embed/), rejecting anything whose scheme/host
+/// isn't actually YouTube. This is a hard security boundary, not just
+/// convenience parsing: the extracted id is the only part of client input
+/// that ever reaches the `yt-dlp` command line (see `canonical_url`), so a
+/// non-YouTube host or a malformed id must never pass here.
 pub fn extract_video_id(url: &str) -> Option<String> {
-    let after_marker = |marker: &str| -> Option<String> {
-        let idx = url.find(marker)?;
-        let rest = &url[idx + marker.len()..];
-        let end = rest.find(['?', '&', '#', '/']).unwrap_or(rest.len());
-        let candidate = &rest[..end];
-        if candidate.is_empty() {
-            None
+    let parsed = Url::parse(url).ok()?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        return None;
+    }
+
+    let host = parsed.host_str()?;
+    let candidate = if host == "youtu.be" {
+        parsed.path_segments()?.next()?.to_string()
+    } else if YOUTUBE_HOSTS.contains(&host) {
+        if let Some((_, v)) = parsed.query_pairs().find(|(k, _)| k == "v") {
+            v.into_owned()
         } else {
-            Some(candidate.to_string())
+            let segments: Vec<&str> = parsed.path_segments()?.collect();
+            segments
+                .windows(2)
+                .find(|w| w[0] == "shorts" || w[0] == "embed")
+                .map(|w| w[1].to_string())?
         }
+    } else {
+        return None;
     };
 
-    after_marker("v=")
-        .or_else(|| after_marker("youtu.be/"))
-        .or_else(|| after_marker("/shorts/"))
-        .or_else(|| after_marker("/embed/"))
+    is_valid_video_id(&candidate).then_some(candidate)
+}
+
+/// YouTube video ids are alphanumeric plus `-`/`_`; this also happens to be
+/// exactly the charset that's safe to use unescaped in a cache key/filename
+/// and can never be interpreted as a `yt-dlp` CLI flag.
+fn is_valid_video_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Builds the URL `yt-dlp` is actually invoked with, from an
+/// already-validated video id. The raw client-supplied URL is deliberately
+/// never passed to `yt-dlp` beyond this point, so there is no path for
+/// attacker-controlled bytes to reach its argv.
+pub fn canonical_url(video_id: &str) -> String {
+    format!("https://www.youtube.com/watch?v={video_id}")
 }
 
 /// For audio-only downloads we don't force a container conversion (avoids an
@@ -69,6 +107,7 @@ pub async fn resolve_extension(url: &str, format: Format) -> Result<String, YtDl
                     "--print",
                     "%(ext)s",
                     "--no-warnings",
+                    "--",
                     url,
                 ])
                 .output()
@@ -111,7 +150,7 @@ pub async fn download_to_file(url: &str, format: Format, dest: &Path) -> Result<
 
     let output = Command::new("yt-dlp")
         .args(&format_args)
-        .args(["-o", dest_str, "--no-warnings", "--no-progress", url])
+        .args(["-o", dest_str, "--no-warnings", "--no-progress", "--", url])
         .output()
         .await?;
 
@@ -126,4 +165,76 @@ pub async fn download_to_file(url: &str, format: Format, dest: &Path) -> Result<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_common_youtube_url_shapes() {
+        assert_eq!(
+            extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+        assert_eq!(
+            extract_video_id("https://youtu.be/dQw4w9WgXcQ?si=abc"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+        assert_eq!(
+            extract_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+        assert_eq!(
+            extract_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ"),
+            Some("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_non_youtube_hosts() {
+        assert_eq!(extract_video_id("https://evil.example/?v=dQw4w9WgXcQ"), None);
+        assert_eq!(
+            extract_video_id("https://youtube.com.evil.example/watch?v=dQw4w9WgXcQ"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_cli_flag_injection_attempts() {
+        // Not a parseable absolute URL at all.
+        assert_eq!(extract_video_id("--exec=touch /tmp/pwned;v=1"), None);
+        // Even if it parsed, the host isn't YouTube.
+        assert_eq!(
+            extract_video_id("https://--exec=x/?v=dQw4w9WgXcQ"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_ids_with_unsafe_characters() {
+        assert_eq!(
+            extract_video_id("https://www.youtube.com/watch?v=../../etc/passwd"),
+            None
+        );
+    }
+
+    #[test]
+    fn ids_starting_with_a_hyphen_are_still_wrapped_into_a_safe_url() {
+        // '-' is part of YouTube's real id alphabet, so it's a valid id —
+        // but canonical_url must ensure it never ends up as a bare argv
+        // token starting with '-'.
+        let id = extract_video_id("https://www.youtube.com/watch?v=-flag-like1").unwrap();
+        let url = canonical_url(&id);
+        assert!(!url.starts_with('-'));
+        assert!(url.starts_with("https://www.youtube.com/watch?v="));
+    }
+
+    #[test]
+    fn canonical_url_is_always_a_safe_https_youtube_link() {
+        assert_eq!(
+            canonical_url("dQw4w9WgXcQ"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+    }
 }
