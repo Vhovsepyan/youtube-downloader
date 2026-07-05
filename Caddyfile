@@ -1,0 +1,16 @@
+{$SITE_ADDRESS:localhost} {
+	# Automatic HTTPS (Let's Encrypt) kicks in once SITE_ADDRESS is a real
+	# domain pointed at this server. Set it via the SITE_ADDRESS env var,
+	# e.g. SITE_ADDRESS=downloads.example.com
+
+	# API + job/video endpoints -> the Rust backend.
+	reverse_proxy /api/* app:8080
+
+	# Frontend static build goes here, served from the same origin as the
+	# API so no CORS setup is needed. Point `root` at wherever your
+	# frontend's build output is mounted/copied to in this container once
+	# it exists.
+	# root * /srv/frontend
+	# file_server
+	# try_files {path} /index.html
+}

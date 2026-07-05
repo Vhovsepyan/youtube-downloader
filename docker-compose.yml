@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      AUTH_TOKEN: ${AUTH_TOKEN:?set AUTH_TOKEN in .env}
+      MAX_CACHE_GB: "10"
+      MAX_CONCURRENT_DOWNLOADS: "2"
+    volumes:
+      - cache-data:/data/cache
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+
+volumes:
+  cache-data:
+  caddy-data:
+  caddy-config:
