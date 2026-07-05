@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tracing::{error, info};
@@ -24,6 +25,8 @@ pub struct Job {
     #[serde(skip)]
     pub cache_key: String,
     pub status: JobStatus,
+    #[serde(skip)]
+    pub updated_at: Instant,
 }
 
 pub struct JobManager {
@@ -32,9 +35,29 @@ pub struct JobManager {
     jobs: RwLock<HashMap<Uuid, Job>>,
     /// Maps a cache key to the job currently producing it, so concurrent
     /// requests for the same not-yet-cached video/format share one yt-dlp
-    /// run instead of racing duplicate downloads.
-    in_flight: Mutex<HashMap<String, Uuid>>,
+    /// run instead of racing duplicate downloads. Wrapped in its own `Arc`
+    /// so `InFlightGuard` can hold a handle to it independent of the
+    /// `JobManager` it came from.
+    in_flight: Arc<Mutex<HashMap<String, Uuid>>>,
     semaphore: Arc<Semaphore>,
+}
+
+/// Removes a cache key's in-flight marker when dropped, so it's cleared on
+/// every exit path out of `run_job` — including a panic — not just the
+/// normal-completion path.
+struct InFlightGuard {
+    in_flight: Arc<Mutex<HashMap<String, Uuid>>>,
+    cache_key: String,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        let in_flight = Arc::clone(&self.in_flight);
+        let cache_key = std::mem::take(&mut self.cache_key);
+        tokio::spawn(async move {
+            in_flight.lock().await.remove(&cache_key);
+        });
+    }
 }
 
 impl JobManager {
@@ -44,7 +67,7 @@ impl JobManager {
             config,
             cache: Mutex::new(cache),
             jobs: RwLock::new(HashMap::new()),
-            in_flight: Mutex::new(HashMap::new()),
+            in_flight: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
         })
     }
@@ -63,7 +86,17 @@ impl JobManager {
         // non-YouTube host.
         let canonical_url = ytdlp::canonical_url(&video_id);
 
-        // Cache hit: return an immediately-ready job.
+        // Hold the in_flight lock across the whole decision — cache-hit
+        // check, in-flight check, and (if neither hits) registering the new
+        // job as in-flight — so two concurrent submits for the same
+        // cache_key can't both slip past the checks before either registers,
+        // which would otherwise race two yt-dlp downloads onto one file.
+        let mut in_flight = self.in_flight.lock().await;
+
+        if let Some(existing_id) = in_flight.get(&cache_key) {
+            return Ok(*existing_id);
+        }
+
         {
             let mut cache = self.cache.lock().await;
             if cache.get(&cache_key).is_some() {
@@ -74,17 +107,10 @@ impl JobManager {
                         id,
                         cache_key: cache_key.clone(),
                         status: JobStatus::Ready,
+                        updated_at: Instant::now(),
                     },
                 );
                 return Ok(id);
-            }
-        }
-
-        // Dedupe against an in-flight job for the same cache key.
-        {
-            let in_flight = self.in_flight.lock().await;
-            if let Some(existing_id) = in_flight.get(&cache_key) {
-                return Ok(*existing_id);
             }
         }
 
@@ -95,9 +121,11 @@ impl JobManager {
                 id,
                 cache_key: cache_key.clone(),
                 status: JobStatus::Queued,
+                updated_at: Instant::now(),
             },
         );
-        self.in_flight.lock().await.insert(cache_key.clone(), id);
+        in_flight.insert(cache_key.clone(), id);
+        drop(in_flight);
 
         let this = Arc::clone(self);
         tokio::spawn(async move {
@@ -111,17 +139,35 @@ impl JobManager {
         self.jobs.read().await.get(&id).cloned()
     }
 
-    /// Returns the cache file path for a `Ready` job, if it still exists.
-    pub async fn ready_path(&self, id: Uuid) -> Option<std::path::PathBuf> {
+    /// Returns the cache file path for a `Ready` job, if it still exists,
+    /// pinned against eviction for as long as the returned `ReadPin` lives.
+    pub async fn ready_path(&self, id: Uuid) -> Option<(std::path::PathBuf, crate::cache::ReadPin)> {
         let job = self.jobs.read().await.get(&id).cloned()?;
         if !matches!(job.status, JobStatus::Ready) {
             return None;
         }
-        self.cache.lock().await.get(&job.cache_key)
+        self.cache.lock().await.get_for_read(&job.cache_key)
+    }
+
+    /// Removes finished (`Ready`/`Failed`) jobs whose status hasn't changed
+    /// in over `max_age`, so the job map doesn't grow without bound over
+    /// the life of the process.
+    pub async fn reap_finished_jobs(&self, max_age: Duration) {
+        let now = Instant::now();
+        self.jobs.write().await.retain(|_, job| match job.status {
+            JobStatus::Ready | JobStatus::Failed { .. } => {
+                now.duration_since(job.updated_at) < max_age
+            }
+            _ => true,
+        });
     }
 
     async fn run_job(self: Arc<Self>, id: Uuid, url: String, cache_key: String, format: Format) {
         let _permit = self.semaphore.acquire().await.expect("semaphore not closed");
+        let _in_flight_guard = InFlightGuard {
+            in_flight: Arc::clone(&self.in_flight),
+            cache_key: cache_key.clone(),
+        };
 
         self.set_status(id, JobStatus::Downloading).await;
 
@@ -137,8 +183,6 @@ impl JobManager {
                 self.set_status(id, JobStatus::Failed { error: e }).await;
             }
         }
-
-        self.in_flight.lock().await.remove(&cache_key);
     }
 
     async fn execute_download(&self, url: &str, cache_key: &str, format: Format) -> Result<(), String> {
@@ -163,7 +207,7 @@ impl JobManager {
         self.cache
             .lock()
             .await
-            .insert(cache_key.to_string(), dest, size);
+            .insert(cache_key.to_string(), dest, size)?;
 
         Ok(())
     }
@@ -171,6 +215,7 @@ impl JobManager {
     async fn set_status(&self, id: Uuid, status: JobStatus) {
         if let Some(job) = self.jobs.write().await.get_mut(&id) {
             job.status = status;
+            job.updated_at = Instant::now();
         }
     }
 

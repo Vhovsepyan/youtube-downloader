@@ -21,6 +21,7 @@ impl Config {
         let max_concurrent_downloads: usize = env::var("MAX_CONCURRENT_DOWNLOADS")
             .ok()
             .and_then(|v| v.parse().ok())
+            .filter(|&v| v > 0)
             .unwrap_or(2);
         let auth_token = env::var("AUTH_TOKEN")
             .expect("AUTH_TOKEN environment variable must be set");

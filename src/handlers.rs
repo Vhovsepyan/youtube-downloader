@@ -28,9 +28,21 @@ pub async fn require_token(
         .and_then(|v| v.strip_prefix("Bearer "));
 
     match provided {
-        Some(token) if token == expected => Ok(next.run(req).await),
+        Some(token) if constant_time_eq(token, expected) => Ok(next.run(req).await),
         _ => Err(AppError::Unauthorized),
     }
+}
+
+/// Compares two strings without short-circuiting on the first differing
+/// byte, so response timing doesn't leak how many leading bytes of a
+/// guessed token matched — this guards every endpoint, so it's the one
+/// comparison in the app worth doing carefully.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[derive(Deserialize)]
@@ -83,11 +95,15 @@ pub async fn get_video(
     Path(id): Path<Uuid>,
     req: Request,
 ) -> Result<Response, AppError> {
-    let path = manager
+    let (path, _pin) = manager
         .ready_path(id)
         .await
         .ok_or_else(|| AppError::NotFound("job not found or not ready yet".to_string()))?;
 
+    // `_pin` stays alive until this function returns, which covers the
+    // window in which ServeFile actually opens the file below — after
+    // that, an unrelated eviction can't pull the file out from under an
+    // already-open read.
     let result = ServeFile::new(path).oneshot(req).await;
 
     match result {

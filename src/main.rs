@@ -29,6 +29,19 @@ async fn main() {
     let bind_addr = config.bind_addr.clone();
     let manager = JobManager::new(config, cache);
 
+    {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                interval.tick().await;
+                manager
+                    .reap_finished_jobs(std::time::Duration::from_secs(3600))
+                    .await;
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/api/jobs", post(handlers::create_job))
         .route("/api/jobs/{id}", get(handlers::get_job))
