@@ -328,11 +328,36 @@
 
     const el = document.createElement("div");
     el.className = "job card";
+    el.innerHTML = `
+      <button class="dismiss" title="Remove">×</button>
+      <div class="url">${escapeHtml(url)}</div>
+      <div class="meta">
+        <span class="badge">${escapeHtml(qualityLabel(quality))}</span>
+        <span class="badge">${intent === "download" ? "Download" : "Play"}</span>
+        <span class="status-area"></span>
+      </div>
+      <div class="result"></div>
+    `;
     jobsList.prepend(el);
 
-    const row = { el, url, quality, intent, jobId: null, status: "submitting", error: null, timer: null };
+    const row = {
+      el,
+      statusEl: el.querySelector(".status-area"),
+      resultEl: el.querySelector(".result"),
+      url,
+      quality,
+      intent,
+      jobId: null,
+      status: "submitting",
+      error: null,
+      timer: null,
+      resultRendered: false,
+    };
     rows.set(rowId, row);
-    render(rowId);
+
+    el.querySelector(".dismiss").addEventListener("click", () => dismiss(rowId));
+
+    update(rowId);
     submitJob(rowId);
   }
 
@@ -353,12 +378,12 @@
         if (!ok) {
           row.status = "failed";
           row.error = data.error || "request failed";
-          render(rowId);
+          update(rowId);
           return;
         }
         row.jobId = data.job_id;
         row.status = "queued";
-        render(rowId);
+        update(rowId);
         poll(rowId);
       })
       .catch((err) => {
@@ -366,7 +391,7 @@
         if (!row) return;
         row.status = "failed";
         row.error = String(err);
-        render(rowId);
+        update(rowId);
       });
   }
 
@@ -386,7 +411,7 @@
         clearInterval(row.timer);
         row.status = "failed";
         row.error = String(err);
-        render(rowId);
+        update(rowId);
         return;
       }
 
@@ -394,7 +419,7 @@
         clearInterval(row.timer);
         row.status = "failed";
         row.error = data.error || "lookup failed";
-        render(rowId);
+        update(rowId);
         return;
       }
 
@@ -402,13 +427,10 @@
       if (row.status === "failed") {
         row.error = data.status.error || "download failed";
         clearInterval(row.timer);
-        render(rowId);
       } else if (row.status === "ready") {
         clearInterval(row.timer);
-        render(rowId);
-      } else {
-        render(rowId);
       }
+      update(rowId);
     }, 1500);
   }
 
@@ -418,7 +440,9 @@
     row.status = "submitting";
     row.error = null;
     row.jobId = null;
-    render(rowId);
+    row.resultRendered = false;
+    row.resultEl.innerHTML = "";
+    update(rowId);
     submitJob(rowId);
   }
 
@@ -430,7 +454,11 @@
     rows.delete(rowId);
   }
 
-  function render(rowId) {
+  // Updates the status badge/spinner every poll tick, and — unlike a full
+  // re-render — never touches `.result` once it's been populated, so an
+  // in-progress <video>/<audio> element (started while still downloading)
+  // never gets torn down and restarted by a later poll tick.
+  function update(rowId) {
     const row = rows.get(rowId);
     if (!row) return;
 
@@ -443,65 +471,61 @@
       failed: "failed",
     }[row.status] || row.status;
 
-    let statusHtml = "";
     if (busy) {
-      statusHtml = `<span class="spinner"></span><span>${statusLabel}</span>`;
+      row.statusEl.innerHTML = `<span class="spinner"></span><span>${statusLabel}</span>`;
     } else if (row.status === "ready") {
-      statusHtml = `<span class="status-ready">✓ ready</span>`;
+      row.statusEl.innerHTML = `<span class="status-ready">✓ ready</span>`;
     } else if (row.status === "failed") {
-      statusHtml = `<span class="status-failed">✕ failed</span>`;
+      row.statusEl.innerHTML = `<span class="status-failed">✕ failed</span>`;
     }
 
-    row.el.innerHTML = `
-      <button class="dismiss" title="Remove" data-action="dismiss">×</button>
-      <div class="url">${escapeHtml(row.url)}</div>
-      <div class="meta">
-        <span class="badge">${escapeHtml(qualityLabel(row.quality))}</span>
-        <span class="badge">${row.intent === "download" ? "Download" : "Play"}</span>
-        ${statusHtml}
-      </div>
-      <div class="result"></div>
-    `;
-
-    row.el.querySelector('[data-action="dismiss"]').addEventListener("click", () => dismiss(rowId));
-
-    const resultEl = row.el.querySelector(".result");
+    if (row.resultRendered) return;
 
     if (row.status === "failed") {
+      row.resultRendered = true;
+
       const box = document.createElement("div");
       box.className = "error-box";
       box.textContent = row.error;
-      resultEl.appendChild(box);
+      row.resultEl.appendChild(box);
 
       const retryBtn = document.createElement("button");
       retryBtn.className = "secondary";
       retryBtn.style.marginTop = "0.6rem";
       retryBtn.textContent = "Try again";
       retryBtn.addEventListener("click", () => retry(rowId));
-      resultEl.appendChild(retryBtn);
+      row.resultEl.appendChild(retryBtn);
+      return;
     }
 
-    if (row.status === "ready" && row.jobId) {
-      const src = `/api/videos/${row.jobId}`;
-      if (row.intent === "play") {
-        const player = document.createElement(row.quality === "audio" ? "audio" : "video");
-        player.src = src;
-        player.controls = true;
-        player.autoplay = true;
-        resultEl.appendChild(player);
-      } else {
-        const link = document.createElement("a");
-        link.href = src;
-        link.download = "";
-        link.className = "save-link";
-        link.textContent = "Save file";
-        resultEl.appendChild(link);
+    if (!row.jobId) return;
 
-        if (!row.autoDownloadTriggered) {
-          row.autoDownloadTriggered = true;
-          link.click();
-        }
-      }
+    // Play starts as soon as there's something to stream — the backend
+    // serves the file as it's written once the job is `downloading`, not
+    // just once it's `ready`. How soon playback actually starts depends on
+    // the video: merged qualities don't start writing their final file
+    // until near the end of the download, so it can still feel like a
+    // wait — see StreamingTarget / stream_downloading in the backend.
+    const canPlay = row.intent === "play" && (row.status === "downloading" || row.status === "ready");
+    const canDownload = row.intent === "download" && row.status === "ready";
+
+    if (canPlay) {
+      row.resultRendered = true;
+      const player = document.createElement(row.quality === "audio" ? "audio" : "video");
+      player.src = `/api/videos/${row.jobId}`;
+      player.controls = true;
+      player.autoplay = true;
+      row.resultEl.appendChild(player);
+      player.play().catch(() => {});
+    } else if (canDownload) {
+      row.resultRendered = true;
+      const link = document.createElement("a");
+      link.href = `/api/videos/${row.jobId}`;
+      link.download = "";
+      link.className = "save-link";
+      link.textContent = "Save file";
+      row.resultEl.appendChild(link);
+      link.click();
     }
   }
 

@@ -50,6 +50,23 @@ impl Format {
     }
 }
 
+/// The HTTP `Content-Type` for a job's output file, known as soon as the
+/// extension is resolved (before the download itself starts) so it can be
+/// set on a response that streams the file while it's still being written.
+pub fn content_type_for(format: Format, ext: &str) -> &'static str {
+    if format.max_height().is_some() {
+        return "video/mp4";
+    }
+    match ext {
+        "m4a" => "audio/mp4",
+        "webm" => "audio/webm",
+        "opus" => "audio/opus",
+        "ogg" => "audio/ogg",
+        "mp3" => "audio/mpeg",
+        _ => "application/octet-stream",
+    }
+}
+
 pub struct YtDlpError(pub String);
 
 impl std::fmt::Display for YtDlpError {
@@ -164,6 +181,15 @@ pub async fn download_to_file(url: &str, format: Format, dest: &Path) -> Result<
             format!("bv*[height<={h}]+ba/b[height<={h}]"),
             "--merge-output-format".to_string(),
             "mp4".to_string(),
+            // A regular MP4's index (moov atom) is normally written last,
+            // once ffmpeg knows final byte offsets — making the file
+            // unplayable until the merge finishes. A fragmented MP4 writes
+            // an empty moov upfront and self-contained fragments after, so
+            // whatever's been written so far is always playable, which lets
+            // /api/videos/:id stream this file to a <video> tag while it's
+            // still being written (see JobManager::stream_downloading).
+            "--postprocessor-args".to_string(),
+            "ffmpeg:-movflags frag_keyframe+empty_moov".to_string(),
         ],
         None => vec!["-f".to_string(), "bestaudio".to_string()],
     };
@@ -174,7 +200,29 @@ pub async fn download_to_file(url: &str, format: Format, dest: &Path) -> Result<
 
     let output = Command::new("yt-dlp")
         .args(&format_args)
-        .args(["-o", dest_str, "--no-warnings", "--no-progress", "--", url])
+        .args([
+            "-o",
+            dest_str,
+            // Without this, yt-dlp downloads to "<dest>.part" and only
+            // renames it to `dest` once complete — meaning `dest` never
+            // exists (let alone grows) while downloading, which would
+            // silently defeat progressive streaming for exactly the
+            // single-stream (no-merge) case where it actually works.
+            "--no-part",
+            // Without --no-part there was never a stale file at `dest` to
+            // worry about resuming. With it, any leftover file there (e.g.
+            // from a prior attempt killed mid-download) makes yt-dlp's
+            // default --continue behavior try an HTTP Range resume against
+            // it — which 416s if that offset doesn't correspond to a valid
+            // range on the current response. We always want a fresh
+            // download (see also the proactive cleanup in job.rs), never a
+            // resume, so disable that.
+            "--no-continue",
+            "--no-warnings",
+            "--no-progress",
+            "--",
+            url,
+        ])
         .output()
         .await?;
 

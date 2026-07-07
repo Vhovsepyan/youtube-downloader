@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::cache::CacheIndex;
+use crate::cache::{CacheIndex, ReadPin};
 use crate::config::Config;
 use crate::ytdlp::{self, Format};
 
@@ -19,6 +22,15 @@ pub enum JobStatus {
     Failed { error: String },
 }
 
+/// Where to read a job's output file from and how to label it, known as
+/// soon as the extension is resolved — i.e. before the download itself
+/// (which may take a while) has produced any bytes.
+#[derive(Clone)]
+pub struct StreamingTarget {
+    pub path: PathBuf,
+    pub content_type: &'static str,
+}
+
 #[derive(Clone, serde::Serialize)]
 pub struct Job {
     pub id: Uuid,
@@ -27,6 +39,18 @@ pub struct Job {
     pub status: JobStatus,
     #[serde(skip)]
     pub updated_at: Instant,
+    #[serde(skip)]
+    pub streaming_target: Option<StreamingTarget>,
+}
+
+/// What `/api/videos/:id` should do for a job right now.
+pub enum ServeState {
+    /// Fully downloaded and cached; serve normally (Range requests, etc.)
+    /// via the given path, pinned against eviction until `ReadPin` drops.
+    Ready(PathBuf, ReadPin),
+    /// Still being written by yt-dlp; the caller should tail the file and
+    /// stream whatever's been written so far.
+    Downloading(StreamingTarget),
 }
 
 pub struct JobManager {
@@ -108,6 +132,7 @@ impl JobManager {
                         cache_key: cache_key.clone(),
                         status: JobStatus::Ready,
                         updated_at: Instant::now(),
+                        streaming_target: None,
                     },
                 );
                 return Ok(id);
@@ -122,6 +147,7 @@ impl JobManager {
                 cache_key: cache_key.clone(),
                 status: JobStatus::Queued,
                 updated_at: Instant::now(),
+                streaming_target: None,
             },
         );
         in_flight.insert(cache_key.clone(), id);
@@ -139,14 +165,76 @@ impl JobManager {
         self.jobs.read().await.get(&id).cloned()
     }
 
-    /// Returns the cache file path for a `Ready` job, if it still exists,
-    /// pinned against eviction for as long as the returned `ReadPin` lives.
-    pub async fn ready_path(&self, id: Uuid) -> Option<(std::path::PathBuf, crate::cache::ReadPin)> {
+    /// Returns what `/api/videos/:id` should do for this job right now: a
+    /// pinned path to serve normally if it's `Ready`, or a target to stream
+    /// progressively if it's still `Downloading`. `None` for any other
+    /// status (queued/failed/unknown).
+    pub async fn serve_state(&self, id: Uuid) -> Option<ServeState> {
         let job = self.jobs.read().await.get(&id).cloned()?;
-        if !matches!(job.status, JobStatus::Ready) {
-            return None;
+        match job.status {
+            JobStatus::Ready => {
+                let (path, pin) = self.cache.lock().await.get_for_read(&job.cache_key)?;
+                Some(ServeState::Ready(path, pin))
+            }
+            JobStatus::Downloading => job.streaming_target.map(ServeState::Downloading),
+            _ => None,
         }
-        self.cache.lock().await.get_for_read(&job.cache_key)
+    }
+
+    /// Streams a job's output file as it's written: reads whatever's
+    /// available, and on catching up to the current end of file, waits and
+    /// retries as long as the job is still queued/downloading. Stops once
+    /// the job is `Ready` (by then the file is guaranteed complete — this
+    /// only ever observes `Ready` after `execute_download` has fully
+    /// finished writing it and calling `insert`) or anything else
+    /// (failed/gone), at which point one last zero-byte read reliably means
+    /// "that's the whole file."
+    pub fn stream_downloading(
+        self: Arc<Self>,
+        id: Uuid,
+        path: PathBuf,
+    ) -> impl futures_util::Stream<Item = std::io::Result<Bytes>> {
+        async_stream::try_stream! {
+            let mut file = self.wait_for_file(id, &path).await?;
+
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n > 0 {
+                    yield Bytes::copy_from_slice(&buf[..n]);
+                    continue;
+                }
+                if self.still_producing(id).await {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Waits for a job's output file to be created — for merged formats it
+    /// isn't created until the source streams finish downloading and
+    /// ffmpeg starts merging, which can be well after the job entered
+    /// `Downloading` — polling job status meanwhile so a job that fails
+    /// before ever producing a file doesn't wait forever.
+    async fn wait_for_file(&self, id: Uuid, path: &std::path::Path) -> std::io::Result<tokio::fs::File> {
+        loop {
+            match tokio::fs::File::open(path).await {
+                Ok(f) => return Ok(f),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.still_producing(id).await => {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn still_producing(&self, id: Uuid) -> bool {
+        matches!(
+            self.jobs.read().await.get(&id).map(|j| &j.status),
+            Some(JobStatus::Queued) | Some(JobStatus::Downloading)
+        )
     }
 
     /// Removes finished (`Ready`/`Failed`) jobs whose status hasn't changed
@@ -169,9 +257,26 @@ impl JobManager {
             cache_key: cache_key.clone(),
         };
 
-        self.set_status(id, JobStatus::Downloading).await;
+        let ext = match ytdlp::resolve_extension(&url, format).await {
+            Ok(ext) => ext,
+            Err(e) => {
+                error!(job_id = %id, cache_key, error = %e, "failed to resolve extension");
+                self.set_status(id, JobStatus::Failed { error: e.to_string() }).await;
+                return;
+            }
+        };
 
-        let result = self.execute_download(&url, &cache_key, format).await;
+        let dest = {
+            let cache = self.cache.lock().await;
+            cache.path_for(&cache_key, &ext)
+        };
+        let target = StreamingTarget {
+            path: dest.clone(),
+            content_type: ytdlp::content_type_for(format, &ext),
+        };
+        self.set_downloading(id, target).await;
+
+        let result = self.execute_download(&url, &cache_key, format, &dest).await;
 
         match result {
             Ok(()) => {
@@ -185,21 +290,24 @@ impl JobManager {
         }
     }
 
-    async fn execute_download(&self, url: &str, cache_key: &str, format: Format) -> Result<(), String> {
-        let ext = ytdlp::resolve_extension(url, format)
+    async fn execute_download(
+        &self,
+        url: &str,
+        cache_key: &str,
+        format: Format,
+        dest: &std::path::Path,
+    ) -> Result<(), String> {
+        // yt-dlp writes straight to `dest` (see download_to_file's
+        // --no-part), so any file already there from a prior attempt (e.g.
+        // this process was killed mid-download) must be cleared first —
+        // otherwise yt-dlp treats it as resumable and can 416 against it.
+        let _ = tokio::fs::remove_file(dest).await;
+
+        ytdlp::download_to_file(url, format, dest)
             .await
             .map_err(|e| e.to_string())?;
 
-        let dest = {
-            let cache = self.cache.lock().await;
-            cache.path_for(cache_key, &ext)
-        };
-
-        ytdlp::download_to_file(url, format, &dest)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let size = tokio::fs::metadata(&dest)
+        let size = tokio::fs::metadata(dest)
             .await
             .map_err(|e| e.to_string())?
             .len();
@@ -207,9 +315,17 @@ impl JobManager {
         self.cache
             .lock()
             .await
-            .insert(cache_key.to_string(), dest, size)?;
+            .insert(cache_key.to_string(), dest.to_path_buf(), size)?;
 
         Ok(())
+    }
+
+    async fn set_downloading(&self, id: Uuid, target: StreamingTarget) {
+        if let Some(job) = self.jobs.write().await.get_mut(&id) {
+            job.status = JobStatus::Downloading;
+            job.streaming_target = Some(target);
+            job.updated_at = Instant::now();
+        }
     }
 
     async fn set_status(&self, id: Uuid, status: JobStatus) {

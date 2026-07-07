@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::Next;
@@ -11,7 +12,7 @@ use tower_http::services::ServeFile;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::job::{Job, JobManager};
+use crate::job::{Job, JobManager, ServeState};
 use crate::ytdlp::Format;
 
 pub async fn require_token(
@@ -102,27 +103,41 @@ pub async fn get_video(
     Path(id): Path<Uuid>,
     req: Request,
 ) -> Result<Response, AppError> {
-    let (path, _pin) = manager
-        .ready_path(id)
-        .await
-        .ok_or_else(|| AppError::NotFound("job not found or not ready yet".to_string()))?;
+    match manager.serve_state(id).await {
+        Some(ServeState::Ready(path, _pin)) => {
+            // `_pin` stays alive until this function returns, which covers
+            // the window in which ServeFile actually opens the file below —
+            // after that, an unrelated eviction can't pull the file out
+            // from under an already-open read.
+            let result = ServeFile::new(path).oneshot(req).await;
 
-    // `_pin` stays alive until this function returns, which covers the
-    // window in which ServeFile actually opens the file below — after
-    // that, an unrelated eviction can't pull the file out from under an
-    // already-open read.
-    let result = ServeFile::new(path).oneshot(req).await;
-
-    match result {
-        Ok(response) => {
-            if response.status() == StatusCode::NOT_FOUND {
-                Err(AppError::NotFound(
-                    "cached file was evicted before it could be served".to_string(),
-                ))
-            } else {
-                Ok(response.into_response())
+            match result {
+                Ok(response) => {
+                    if response.status() == StatusCode::NOT_FOUND {
+                        Err(AppError::NotFound(
+                            "cached file was evicted before it could be served".to_string(),
+                        ))
+                    } else {
+                        Ok(response.into_response())
+                    }
+                }
+                Err(err) => Err(AppError::Internal(err.to_string())),
             }
         }
-        Err(err) => Err(AppError::Internal(err.to_string())),
+        Some(ServeState::Downloading(target)) => {
+            // Still being written — stream whatever's on disk so far and
+            // keep tailing it as more arrives. No Content-Length/Range
+            // support here (final size isn't known yet), so this is
+            // sequential-playback-only until the job finishes.
+            let stream = Arc::clone(&manager).stream_downloading(id, target.path);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, target.content_type)
+                .body(Body::from_stream(stream))
+                .map_err(|e| AppError::Internal(e.to_string()))
+        }
+        None => Err(AppError::NotFound(
+            "job not found or not ready yet".to_string(),
+        )),
     }
 }

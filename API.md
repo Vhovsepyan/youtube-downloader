@@ -70,26 +70,41 @@ indefinitely.
 
 ## `GET /api/videos/:id`
 
-Fetch the actual media once the job's status is `ready`. Standard file
-serving with `Range` request support (seek/scrub works out of the box —
-send a `Range: bytes=...` header as any `<video>`/`<audio>` element does
-automatically).
+Fetch the job's output file. Behavior depends on the job's status:
+
+- **`ready`** — standard file serving with `Range` request support
+  (seek/scrub works out of the box — send a `Range: bytes=...` header as
+  any `<video>`/`<audio>` element does automatically).
+- **`downloading`** — streams whatever's been written to the output file
+  so far, then keeps tailing it as more arrives, ending the response once
+  the job finishes. `200 OK` with a `Content-Type` but **no
+  `Content-Length`** (final size isn't known yet) and no `Range` support —
+  this is sequential playback only, no seeking ahead of what's already
+  streamed. How soon bytes actually start flowing depends on the video:
+  qualities that require merging separate video+audio streams (common for
+  1080p, sometimes lower) don't start writing their final output until
+  that merge begins near the end of the underlying download, so it can
+  still feel like a wait even though the endpoint responds immediately.
+- **`queued`/`failed`/unknown id** — `404`.
 
 **Errors:**
-- `404` — job not found, not yet `ready`, or the cached file was evicted
-  (LRU) before you fetched it — in that case, `POST /api/jobs` again with
-  the same URL to re-trigger a download.
+- `404` — job not found, still `queued`, `failed`, or (if `ready`) the
+  cached file was evicted (LRU) before you fetched it — in that case,
+  `POST /api/jobs` again with the same URL to re-trigger a download.
 
 ## Typical frontend flow
 
 1. `POST /api/jobs` with the URL and quality → get `job_id`.
 2. Poll `GET /api/jobs/:job_id` every ~1-2s until `status.status` is
    `ready` or `failed`.
-3. On `ready`, either:
-   - set a `<video>`/`<audio>` element's `src` to `/api/videos/:job_id`
-     directly (the browser sends the `auth_token` cookie automatically,
-     including on Range requests, so native seeking/scrubbing works), or
-   - use a plain `<a href="/api/videos/:job_id" download>` to trigger a
-     native browser download.
-4. On `failed`, show `status.error` to the user; there's no auto-retry, so
+3. To play: set a `<video>`/`<audio>` element's `src` to
+   `/api/videos/:job_id` as soon as status is `downloading` or `ready` (the
+   browser sends the `auth_token` cookie automatically, including on Range
+   requests when the file is already `ready`) — no need to wait for
+   `ready` first.
+4. To download: wait for `ready`, then use a plain
+   `<a href="/api/videos/:job_id" download>` to trigger a native browser
+   download (downloading a still-in-progress file doesn't make sense, so
+   this one does wait).
+5. On `failed`, show `status.error` to the user; there's no auto-retry, so
    surface a manual "try again" action that just re-submits the job.
