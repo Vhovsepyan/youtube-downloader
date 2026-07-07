@@ -303,7 +303,7 @@ impl JobManager {
         // otherwise yt-dlp treats it as resumable and can 416 against it.
         let _ = tokio::fs::remove_file(dest).await;
 
-        ytdlp::download_to_file(url, format, dest)
+        ytdlp::download_to_file(url, format, dest, self.config.download_timeout)
             .await
             .map_err(|e| e.to_string())?;
 

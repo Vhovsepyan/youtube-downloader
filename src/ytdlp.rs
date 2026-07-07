@@ -1,7 +1,30 @@
 use std::path::Path;
+use std::time::Duration;
 
 use tokio::process::Command;
 use url::Url;
+
+/// Metadata-only probes (no data transfer) should never legitimately take
+/// long; a short bound here catches a genuinely broken `yt-dlp`/network
+/// without needing to be user-configurable.
+const METADATA_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Runs a yt-dlp (or other) command with a hard timeout, killing the
+/// process (and any child it spawned, e.g. ffmpeg) if it's exceeded —
+/// without this, a stalled download (YouTube throttling a stream to
+/// near-zero, or a genuinely hung process) would tie up a concurrency slot
+/// forever with no way to recover.
+async fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<std::process::Output, YtDlpError> {
+    cmd.kill_on_drop(true);
+    let child = cmd.spawn()?;
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(YtDlpError(format!(
+            "yt-dlp did not finish within {}s (likely stalled or throttled by YouTube)",
+            timeout.as_secs()
+        ))),
+    }
+}
 
 const YOUTUBE_HOSTS: &[&str] = &[
     "youtube.com",
@@ -140,19 +163,18 @@ pub async fn resolve_extension(url: &str, format: Format) -> Result<String, YtDl
     match format {
         Format::P1080 | Format::P720 | Format::P480 | Format::P360 => Ok("mp4".to_string()),
         Format::Audio => {
-            let output = Command::new("yt-dlp")
-                .args([
-                    "-f",
-                    "bestaudio",
-                    "--skip-download",
-                    "--print",
-                    "%(ext)s",
-                    "--no-warnings",
-                    "--",
-                    url,
-                ])
-                .output()
-                .await?;
+            let mut cmd = Command::new("yt-dlp");
+            cmd.args([
+                "-f",
+                "bestaudio",
+                "--skip-download",
+                "--print",
+                "%(ext)s",
+                "--no-warnings",
+                "--",
+                url,
+            ]);
+            let output = run_with_timeout(&mut cmd, METADATA_PROBE_TIMEOUT).await?;
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -174,7 +196,12 @@ pub async fn resolve_extension(url: &str, format: Format) -> Result<String, YtDl
 /// merge to a pipe silently downgrades the container to MPEG-TS instead —
 /// which doesn't reliably carry common video codecs (e.g. VP9) at all.
 /// Writing straight to `dest` avoids that entirely and is simpler besides.
-pub async fn download_to_file(url: &str, format: Format, dest: &Path) -> Result<(), YtDlpError> {
+pub async fn download_to_file(
+    url: &str,
+    format: Format,
+    dest: &Path,
+    timeout: Duration,
+) -> Result<(), YtDlpError> {
     let format_args: Vec<String> = match format.max_height() {
         Some(h) => vec![
             "-f".to_string(),
@@ -198,33 +225,31 @@ pub async fn download_to_file(url: &str, format: Format, dest: &Path) -> Result<
         .to_str()
         .ok_or_else(|| YtDlpError("cache path is not valid UTF-8".to_string()))?;
 
-    let output = Command::new("yt-dlp")
-        .args(&format_args)
-        .args([
-            "-o",
-            dest_str,
-            // Without this, yt-dlp downloads to "<dest>.part" and only
-            // renames it to `dest` once complete — meaning `dest` never
-            // exists (let alone grows) while downloading, which would
-            // silently defeat progressive streaming for exactly the
-            // single-stream (no-merge) case where it actually works.
-            "--no-part",
-            // Without --no-part there was never a stale file at `dest` to
-            // worry about resuming. With it, any leftover file there (e.g.
-            // from a prior attempt killed mid-download) makes yt-dlp's
-            // default --continue behavior try an HTTP Range resume against
-            // it — which 416s if that offset doesn't correspond to a valid
-            // range on the current response. We always want a fresh
-            // download (see also the proactive cleanup in job.rs), never a
-            // resume, so disable that.
-            "--no-continue",
-            "--no-warnings",
-            "--no-progress",
-            "--",
-            url,
-        ])
-        .output()
-        .await?;
+    let mut cmd = Command::new("yt-dlp");
+    cmd.args(&format_args).args([
+        "-o",
+        dest_str,
+        // Without this, yt-dlp downloads to "<dest>.part" and only
+        // renames it to `dest` once complete — meaning `dest` never
+        // exists (let alone grows) while downloading, which would
+        // silently defeat progressive streaming for exactly the
+        // single-stream (no-merge) case where it actually works.
+        "--no-part",
+        // Without --no-part there was never a stale file at `dest` to
+        // worry about resuming. With it, any leftover file there (e.g.
+        // from a prior attempt killed mid-download) makes yt-dlp's
+        // default --continue behavior try an HTTP Range resume against
+        // it — which 416s if that offset doesn't correspond to a valid
+        // range on the current response. We always want a fresh
+        // download (see also the proactive cleanup in job.rs), never a
+        // resume, so disable that.
+        "--no-continue",
+        "--no-warnings",
+        "--no-progress",
+        "--",
+        url,
+    ]);
+    let output = run_with_timeout(&mut cmd, timeout).await?;
 
     if !output.status.success() {
         let _ = tokio::fs::remove_file(dest).await;

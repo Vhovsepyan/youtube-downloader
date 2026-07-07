@@ -6,6 +6,7 @@ services:
       AUTH_TOKEN: ${AUTH_TOKEN:?set AUTH_TOKEN in .env}
       MAX_CACHE_GB: "10"
       MAX_CONCURRENT_DOWNLOADS: "2"
+      DOWNLOAD_TIMEOUT_SECS: "900"
     volumes:
       - cache-data:/data/cache
     expose:

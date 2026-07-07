@@ -192,6 +192,12 @@
     font-size: 0.85rem;
   }
 
+  .job .throttle-hint {
+    margin-top: 0.4rem;
+    color: var(--muted);
+    font-size: 0.8rem;
+  }
+
   .job .result {
     margin-top: 0.7rem;
   }
@@ -336,6 +342,7 @@
         <span class="badge">${intent === "download" ? "Download" : "Play"}</span>
         <span class="status-area"></span>
       </div>
+      <div class="throttle-hint hidden">Higher qualities can take several minutes on some videos — YouTube throttles these downloads server-side, not this app.</div>
       <div class="result"></div>
     `;
     jobsList.prepend(el);
@@ -343,6 +350,7 @@
     const row = {
       el,
       statusEl: el.querySelector(".status-area"),
+      hintEl: el.querySelector(".throttle-hint"),
       resultEl: el.querySelector(".result"),
       url,
       quality,
@@ -478,6 +486,9 @@
     } else if (row.status === "failed") {
       row.statusEl.innerHTML = `<span class="status-failed">✕ failed</span>`;
     }
+
+    const showThrottleHint = row.status === "downloading" && (row.quality === "720p" || row.quality === "1080p");
+    row.hintEl.classList.toggle("hidden", !showThrottleHint);
 
     if (row.resultRendered) return;
 

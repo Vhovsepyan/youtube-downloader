@@ -1,5 +1,6 @@
 use std::env;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct Config {
@@ -8,6 +9,7 @@ pub struct Config {
     pub max_cache_bytes: u64,
     pub max_concurrent_downloads: usize,
     pub auth_token: String,
+    pub download_timeout: Duration,
 }
 
 impl Config {
@@ -25,6 +27,16 @@ impl Config {
             .unwrap_or(2);
         let auth_token = env::var("AUTH_TOKEN")
             .expect("AUTH_TOKEN environment variable must be set");
+        // YouTube throttles some video-only streams (seen live: ~720p+ on
+        // some videos crawl at tens of KiB/s), so this needs to be generous
+        // enough not to kill a legitimately-slow-but-working download —
+        // it's a backstop against a genuinely stalled/hung yt-dlp process,
+        // not a "this quality is taking a while" limit.
+        let download_timeout_secs: u64 = env::var("DOWNLOAD_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(900);
 
         Config {
             bind_addr,
@@ -32,6 +44,7 @@ impl Config {
             max_cache_bytes: max_cache_gb * 1024 * 1024 * 1024,
             max_concurrent_downloads,
             auth_token,
+            download_timeout: Duration::from_secs(download_timeout_secs),
         }
     }
 }
