@@ -2,6 +2,9 @@ services:
   app:
     build: .
     restart: unless-stopped
+    # Run an init (tini) as PID 1 so an ffmpeg orphaned by a download timeout
+    # gets reaped instead of lingering as a zombie under our process.
+    init: true
     environment:
       AUTH_TOKEN: ${AUTH_TOKEN:?set AUTH_TOKEN in .env}
       MAX_CACHE_GB: "10"

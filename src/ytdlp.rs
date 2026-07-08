@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::process::Command;
@@ -9,20 +10,50 @@ use url::Url;
 /// without needing to be user-configurable.
 const METADATA_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Runs a yt-dlp (or other) command with a hard timeout, killing the
-/// process (and any child it spawned, e.g. ffmpeg) if it's exceeded —
-/// without this, a stalled download (YouTube throttling a stream to
-/// near-zero, or a genuinely hung process) would tie up a concurrency slot
-/// forever with no way to recover.
+/// Runs a yt-dlp (or other) command with a hard timeout, killing the whole
+/// process tree (yt-dlp *and* any ffmpeg it spawned to merge) if it's
+/// exceeded — without this, a stalled download (YouTube throttling a stream
+/// to near-zero, or a genuinely hung process) would tie up a concurrency
+/// slot forever with no way to recover.
+///
+/// stdout/stderr are captured here; `Command::output` would set this up for
+/// us, but we spawn manually to enforce the timeout, so without it callers
+/// would read empty output (a wrong/empty `--print` result, or a lost error
+/// message) while yt-dlp's real output leaked to our own stdio.
 async fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<std::process::Output, YtDlpError> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Put yt-dlp in its own process group so that on timeout we can signal
+    // the whole group and take down a merging ffmpeg child too; kill_on_drop
+    // alone only reaps the direct child, leaving ffmpeg orphaned and still
+    // writing to `dest`.
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.kill_on_drop(true);
     let child = cmd.spawn()?;
+    #[cfg(unix)]
+    let pid = child.id();
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(result) => Ok(result?),
-        Err(_) => Err(YtDlpError(format!(
-            "yt-dlp did not finish within {}s (likely stalled or throttled by YouTube)",
-            timeout.as_secs()
-        ))),
+        Err(_) => {
+            // Dropping the wait future above already SIGKILLs yt-dlp itself
+            // (kill_on_drop); also signal its process group so any ffmpeg it
+            // spawned dies rather than lingering. pgid == pid because we
+            // spawned with process_group(0); an already-exited group returns
+            // ESRCH, which we ignore.
+            #[cfg(unix)]
+            if let Some(pid) = pid {
+                // Safety: killpg only delivers a signal and is well-defined
+                // for any pid_t; we neither dereference memory nor rely on
+                // the group still existing.
+                unsafe {
+                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            Err(YtDlpError(format!(
+                "yt-dlp did not finish within {}s (likely stalled or throttled by YouTube)",
+                timeout.as_secs()
+            )))
+        }
     }
 }
 
@@ -249,7 +280,19 @@ pub async fn download_to_file(
         "--",
         url,
     ]);
-    let output = run_with_timeout(&mut cmd, timeout).await?;
+    let output = match run_with_timeout(&mut cmd, timeout).await {
+        Ok(output) => output,
+        Err(e) => {
+            // On timeout (or spawn failure) yt-dlp may have written a partial
+            // file to `dest` — we use --no-part, so it's the real path, not a
+            // ".part". The success-path failure branch below removes it on a
+            // non-zero exit; do the same here so a timed-out download doesn't
+            // leave bytes in the cache dir that the size accounting never
+            // tracks (it only records completed downloads).
+            let _ = tokio::fs::remove_file(dest).await;
+            return Err(e);
+        }
+    };
 
     if !output.status.success() {
         let _ = tokio::fs::remove_file(dest).await;
