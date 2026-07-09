@@ -1,8 +1,8 @@
 name: Docker build
 
+# Build-only sanity check for PRs. Pushes to master are built and deployed by
+# deploy.yml, so this doesn't also run on push to avoid a redundant build.
 on:
-  push:
-    branches: ["master"]
   pull_request:
     branches: ["master"]
 

@@ -1,0 +1,11 @@
+# Keep the build context small and reproducible. The image builds Rust from
+# source inside the builder stage, so the local target/ (and other host-only
+# cruft) must not be shipped as context.
+target/
+.git/
+.github/
+.idea/
+.env
+*.sh
+Caddyfile
+docker-compose.yml

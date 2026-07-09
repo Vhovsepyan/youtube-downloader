@@ -6,6 +6,7 @@ use std::time::Duration;
 pub struct Config {
     pub bind_addr: String,
     pub cache_dir: PathBuf,
+    pub frontend_dir: PathBuf,
     pub max_cache_bytes: u64,
     pub max_concurrent_downloads: usize,
     pub auth_token: String,
@@ -14,8 +15,20 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        // BIND_ADDR wins if set. Otherwise honor $PORT (Cloud Run and other
+        // managed platforms inject it and require the container to listen on
+        // it), falling back to the local-dev default.
+        let bind_addr = env::var("BIND_ADDR")
+            .ok()
+            .or_else(|| env::var("PORT").ok().map(|p| format!("0.0.0.0:{p}")))
+            .unwrap_or_else(|| "0.0.0.0:8080".to_string());
         let cache_dir = env::var("CACHE_DIR").unwrap_or_else(|_| "/data/cache".to_string());
+        // Where the static frontend lives. Served directly by the app when
+        // there's no reverse proxy in front (e.g. Cloud Run); when Caddy
+        // fronts the app (docker-compose) it serves web/ itself and this
+        // fallback simply goes unused. Defaults to "web" for `cargo run`
+        // from the repo root.
+        let frontend_dir = env::var("FRONTEND_DIR").unwrap_or_else(|_| "web".to_string());
         let max_cache_gb: u64 = env::var("MAX_CACHE_GB")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -41,6 +54,7 @@ impl Config {
         Config {
             bind_addr,
             cache_dir: PathBuf::from(cache_dir),
+            frontend_dir: PathBuf::from(frontend_dir),
             max_cache_bytes: max_cache_gb * 1024 * 1024 * 1024,
             max_concurrent_downloads,
             auth_token,
