@@ -83,6 +83,16 @@ gcloud secrets add-iam-policy-binding AUTH_TOKEN \
   --project "$PROJECT_ID" \
   --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
   --role="roles/secretmanager.secretAccessor" >/dev/null
+# Same for the youtube-cookies secret, but only if you've created it (see
+# README/cookies setup). The deploy mounts it to get past YouTube's bot check.
+if gcloud secrets describe youtube-cookies --project "$PROJECT_ID" >/dev/null 2>&1; then
+  gcloud secrets add-iam-policy-binding youtube-cookies \
+    --project "$PROJECT_ID" \
+    --member="serviceAccount:${RUNTIME_SA_EMAIL}" \
+    --role="roles/secretmanager.secretAccessor" >/dev/null
+else
+  echo "    (youtube-cookies secret not found yet — create it to enable cookie auth)"
+fi
 
 echo "==> Ensuring Workload Identity pool + provider..."
 if ! gcloud iam workload-identity-pools describe "$POOL" \

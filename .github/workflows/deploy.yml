@@ -79,8 +79,8 @@ jobs:
             --max-instances 3 \
             --concurrency 20 \
             --timeout 900 \
-            --set-env-vars "CACHE_DIR=/tmp/cache,MAX_CACHE_GB=1,MAX_CONCURRENT_DOWNLOADS=2,DOWNLOAD_TIMEOUT_SECS=900" \
-            --set-secrets "AUTH_TOKEN=AUTH_TOKEN:latest"
+            --set-env-vars "CACHE_DIR=/tmp/cache,MAX_CACHE_GB=1,MAX_CONCURRENT_DOWNLOADS=2,DOWNLOAD_TIMEOUT_SECS=900,COOKIES_FILE=/secrets/cookies/youtube-cookies.txt" \
+            --set-secrets "AUTH_TOKEN=AUTH_TOKEN:latest,/secrets/cookies/youtube-cookies.txt=youtube-cookies:latest"
 
       - name: Show service URL
         run: |

@@ -186,15 +186,31 @@ pub fn canonical_url(video_id: &str) -> String {
     format!("https://www.youtube.com/watch?v={video_id}")
 }
 
+/// yt-dlp args to authenticate with a cookies.txt when one is configured.
+/// YouTube blocks anonymous requests from datacenter IPs ("Sign in to confirm
+/// you're not a bot"); a logged-in cookie jar gets past that. Empty when no
+/// cookies file is set, so anonymous behavior is unchanged.
+fn cookie_args(cookies: Option<&Path>) -> Vec<String> {
+    match cookies {
+        Some(path) => vec!["--cookies".to_string(), path.to_string_lossy().into_owned()],
+        None => Vec::new(),
+    }
+}
+
 /// For audio-only downloads we don't force a container conversion (avoids an
 /// unnecessary re-encode), so the real extension varies by source. Resolve
 /// it up front with a cheap metadata-only query before running the actual
 /// download.
-pub async fn resolve_extension(url: &str, format: Format) -> Result<String, YtDlpError> {
+pub async fn resolve_extension(
+    url: &str,
+    format: Format,
+    cookies: Option<&Path>,
+) -> Result<String, YtDlpError> {
     match format {
         Format::P1080 | Format::P720 | Format::P480 | Format::P360 => Ok("mp4".to_string()),
         Format::Audio => {
             let mut cmd = Command::new("yt-dlp");
+            cmd.args(cookie_args(cookies));
             cmd.args([
                 "-f",
                 "bestaudio",
@@ -232,6 +248,7 @@ pub async fn download_to_file(
     format: Format,
     dest: &Path,
     timeout: Duration,
+    cookies: Option<&Path>,
 ) -> Result<(), YtDlpError> {
     let format_args: Vec<String> = match format.max_height() {
         Some(h) => vec![
@@ -257,6 +274,7 @@ pub async fn download_to_file(
         .ok_or_else(|| YtDlpError("cache path is not valid UTF-8".to_string()))?;
 
     let mut cmd = Command::new("yt-dlp");
+    cmd.args(cookie_args(cookies));
     cmd.args(&format_args).args([
         "-o",
         dest_str,

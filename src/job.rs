@@ -257,7 +257,9 @@ impl JobManager {
             cache_key: cache_key.clone(),
         };
 
-        let ext = match ytdlp::resolve_extension(&url, format).await {
+        let ext = match ytdlp::resolve_extension(&url, format, self.config.cookies_file.as_deref())
+            .await
+        {
             Ok(ext) => ext,
             Err(e) => {
                 error!(job_id = %id, cache_key, error = %e, "failed to resolve extension");
@@ -303,9 +305,15 @@ impl JobManager {
         // otherwise yt-dlp treats it as resumable and can 416 against it.
         let _ = tokio::fs::remove_file(dest).await;
 
-        ytdlp::download_to_file(url, format, dest, self.config.download_timeout)
-            .await
-            .map_err(|e| e.to_string())?;
+        ytdlp::download_to_file(
+            url,
+            format,
+            dest,
+            self.config.download_timeout,
+            self.config.cookies_file.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
         let size = tokio::fs::metadata(dest)
             .await

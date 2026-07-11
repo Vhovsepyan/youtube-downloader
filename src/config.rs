@@ -11,6 +11,7 @@ pub struct Config {
     pub max_concurrent_downloads: usize,
     pub auth_token: String,
     pub download_timeout: Duration,
+    pub cookies_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -56,6 +57,27 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v| v > 0)
             .unwrap_or(900);
+        // Optional cookies.txt for yt-dlp, to get past YouTube's "confirm
+        // you're not a bot" block on datacenter IPs. The source may be a
+        // read-only secret mount (Cloud Run), but yt-dlp rewrites the cookie
+        // jar when it exits, so copy it to a writable path and use that.
+        let cookies_file = env::var("COOKIES_FILE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .and_then(|src| {
+                let dst = env::temp_dir().join("yt-dlp-cookies.txt");
+                match std::fs::copy(&src, &dst) {
+                    Ok(_) => Some(dst),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: COOKIES_FILE={src} could not be read ({e}); \
+                             continuing without cookies"
+                        );
+                        None
+                    }
+                }
+            });
 
         Config {
             bind_addr,
@@ -65,6 +87,7 @@ impl Config {
             max_concurrent_downloads,
             auth_token,
             download_timeout: Duration::from_secs(download_timeout_secs),
+            cookies_file,
         }
     }
 }
