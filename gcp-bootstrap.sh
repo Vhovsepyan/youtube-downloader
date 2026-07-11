@@ -47,7 +47,9 @@ fi
 
 echo "==> Ensuring AUTH_TOKEN secret in Secret Manager..."
 if ! gcloud secrets describe AUTH_TOKEN --project "$PROJECT_ID" >/dev/null 2>&1; then
-  openssl rand -hex 32 | gcloud secrets create AUTH_TOKEN \
+  # printf '%s' (no trailing newline) so the stored secret is exactly the
+  # token — a trailing newline would never match what a user pastes into the UI.
+  printf '%s' "$(openssl rand -hex 32)" | gcloud secrets create AUTH_TOKEN \
     --project "$PROJECT_ID" --replication-policy=automatic --data-file=-
   echo "    Created AUTH_TOKEN. Read it (share with friends) via:"
   echo "      gcloud secrets versions access latest --secret=AUTH_TOKEN --project=$PROJECT_ID"

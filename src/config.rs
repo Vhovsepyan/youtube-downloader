@@ -38,8 +38,14 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v| v > 0)
             .unwrap_or(2);
+        // Trim surrounding whitespace: a secret store can hand us the value
+        // with a trailing newline (e.g. `openssl rand -hex 32` piped into it),
+        // which would otherwise never match the newline-free token a user
+        // pastes into the UI.
         let auth_token = env::var("AUTH_TOKEN")
-            .expect("AUTH_TOKEN environment variable must be set");
+            .expect("AUTH_TOKEN environment variable must be set")
+            .trim()
+            .to_string();
         // YouTube throttles some video-only streams (seen live: ~720p+ on
         // some videos crawl at tens of KiB/s), so this needs to be generous
         // enough not to kill a legitimately-slow-but-working download —
