@@ -8,9 +8,10 @@ name: Deploy to Cloud Run
 #   WIF_PROVIDER    full resource name of the workload identity provider
 #   DEPLOY_SA_EMAIL email of the gh-deployer service account
 
+# Disabled from auto-running: Cloud Run is not the live host — YouTube blocks
+# datacenter IPs, so downloads fail there. The app runs on a home PC behind a
+# Cloudflare tunnel instead. Kept for reference; manual dispatch only.
 on:
-  push:
-    branches: ["master"]
   workflow_dispatch:
 
 env:
